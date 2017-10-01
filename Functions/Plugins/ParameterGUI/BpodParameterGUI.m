@@ -62,7 +62,8 @@ switch Op
         VPos = 10;
         HPos = 10;
         MaxVPos = 0;
-        BpodSystem.ProtocolFigures.ParameterGUI = figure('Position', [50 50 450 GUIHeight],'name','Parameter GUI','numbertitle','off', 'MenuBar', 'none', 'Resize', 'on');
+        %was 50 instead of 150
+        BpodSystem.ProtocolFigures.ParameterGUI = figure('Position', [0 50 450 GUIHeight],'name','Parameter GUI','numbertitle','off', 'MenuBar', 'none', 'Resize', 'on');
         ParamNum = 1;
         for p = 1:nPanels
             ThisPanelParamNames = Panels.(PanelNames{p});
