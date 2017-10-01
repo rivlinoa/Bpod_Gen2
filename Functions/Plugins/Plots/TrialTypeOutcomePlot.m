@@ -1,8 +1,8 @@
 %{
 ----------------------------------------------------------------------------
 
-This file is part of the Bpod Project
-Copyright (C) 2015 Joshua I. Sanders, Cold Spring Harbor Laboratory, NY, USA
+This file is part of the Sanworks Bpod repository
+Copyright (C) 2017 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -10,8 +10,8 @@ This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, version 3.
 
-This program is distributed  WITHOUT ANY WARRANTY and without even the 
-implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
@@ -61,6 +61,11 @@ switch Action
         if nargin > 3 %custom number of trials
             nTrialsToShow =varargin{3};
         end
+        if ispc
+            labelFontSize = 18;
+        else
+            labelFontSize = 15;
+        end
         axes(AxesHandle);
         MaxTrialType = max(TrialTypeList);
         %plot in specified axes
@@ -79,7 +84,7 @@ switch Action
             BpodSystem.GUIHandles.TTOP_Ylabel = strsplit(num2str(MaxTrialType:-1:-1));
         end
         set(AxesHandle,'TickDir', 'out','YLim', [-MaxTrialType-.5, -.5], 'YTick', -MaxTrialType:1:-1,'YTickLabel', BpodSystem.GUIHandles.TTOP_Ylabel, 'FontSize', 16);
-        xlabel(AxesHandle, 'Trial#', 'FontSize', 18);
+        xlabel(AxesHandle, 'Trial#', 'FontSize', labelFontSize);
         ylabel(AxesHandle, 'Trial Type', 'FontSize', 16);
         hold(AxesHandle, 'on');
         

@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Sanworks Bpod repository
-Copyright (C) 2017 Sanworks LLC, Sound Beach, New York, USA
+Copyright (C) 2017 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -19,14 +19,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 classdef BpodObject < handle
     properties
-        FirmwareBuild % An integer specifying the firmware on the connected device
+        MachineType % 1 = Bpod 0.5, 2 = Bpod 0.7+, 3 = Pocket State Machine
+        FirmwareVersion % An integer specifying the firmware on the connected device
         SerialPort % ArCOM serial port object
         HW % Hardware description
         Modules % Connected UART serial module description
+        ModuleUSB % Struct containing a field for each connected module, listing its paired USB port (i.e. ModuleUSB.ModuleName = 'COM3')
         Status % Struct with system status variables
         Path % Struct with paths to Bpod root folder and specific sub-folders
         Data % Struct storing all data collected in the current session. SaveBpodSessionData saves this to the current data file.
-        StateMatrix % Struct of matrices describing current state machine
+        StateMatrix % Struct of matrices describing current (running) state machine
+        StateMatrixSent % StateMatrix sent to the state machine, for the next trial. At run, this replaces StateMatrix.
         HardwareState % Current state of I/O lines and serial codes
         StateMachineInfo % Struct with information about state machines (customized for connected hardware)
         GUIHandles % Struct with graphics handles
@@ -49,16 +52,17 @@ classdef BpodObject < handle
         BonsaiSocket % An object containing a TCP/IP socket for communication with Bonsai
         EmulatorMode % 0 if actual device connected, 1 if emulator
         HostOS % Holds a string naming the host operating system (i.e. 'Microsoft Windows XP')
-        MachineType % 1 = Arduino Due / Bpod 0.5, 0.7. 2 = Pocket State Machine
         Timers % A struct containing MATLAB timer objects
     end
     properties (Access = private)
+        CurrentFirmware % Struct of current firmware versions for state machine + curated modules 
         SplashData % Splash screen frames
         LastHardwareState % Last known state of I/O lines and serial codes
         CycleMonitoring % 0 = off, 1 = on. Measures min and max actual hardware timer callback execution time
     end
     methods
-        function obj = BpodObject %Constructor
+        function obj = BpodObject %Constructor            
+            % Add Bpod code to MATLAB path
             BpodPath = fileparts(which('Bpod'));
             addpath(genpath(fullfile(BpodPath, 'Assets')));
             addpath(genpath(fullfile(BpodPath, 'Examples', 'State Machines')));
@@ -69,6 +73,7 @@ classdef BpodObject < handle
             else
                 rand('twister', sum(100*fliplr(clock))); % For older versions of MATLAB
             end
+            
             % Check for font
             F = listfonts;
             if (sum(strcmp(F, 'OCRAStd')) == 0) && (sum(strcmp(F, 'OCR A Std')) == 0)
@@ -98,6 +103,7 @@ classdef BpodObject < handle
                     error('Font installed. Please restart MATLAB and run Bpod again.')
                 end
             end
+            % Setup
             obj.SplashData.BG = SplashBGData;
             obj.SplashData.Messages = SplashMessageData;
             obj.GUIHandles.SplashFig = figure('Position',[400 300 485 300],'name','Bpod','numbertitle','off', 'MenuBar', 'none', 'Resize', 'off');
@@ -130,6 +136,7 @@ classdef BpodObject < handle
             obj.Path.CurrentProtocol= '';
             obj.Path.InputConfig = fullfile(obj.Path.SettingsDir, 'InputConfig.mat');
             obj.Path.SyncConfig = fullfile(obj.Path.SettingsDir, 'SyncConfig.mat');
+            obj.Path.ModuleUSBConfig = fullfile(obj.Path.SettingsDir, 'ModuleUSBConfig.mat');
             obj.StateMachineInfo = struct;
             obj.StateMachineInfo.nEvents = 0; % Number of events the state machine can respond to
             obj.StateMachineInfo.EventNames = 0; % Cell array of strings with names for each event
@@ -200,13 +207,25 @@ classdef BpodObject < handle
             end
             load(obj.Path.SyncConfig);
             obj.SyncConfig = BpodSyncConfig;
+            
+            % Create module USB port config file (if not present)
+            if ~exist(obj.Path.ModuleUSBConfig)
+                copyfile(fullfile(obj.Path.BpodRoot, 'Examples', 'Example Settings Files', 'ModuleUSBConfig.mat'), obj.Path.ModuleUSBConfig);
+            end
+            
+            % Load list of current firmware versions
+            CF = CurrentFirmwareList; % Located in /Functions/Internal Functions/, returns list of current firmware
+                                      % for state machine and modules
+            obj.CurrentFirmware = CF;
+            % Create timer objects
             obj.Timers = struct;
             obj.Timers.PortRelayTimer = timer('TimerFcn','UpdateSerialTerminals()', 'ExecutionMode', 'fixedRate', 'Period', 0.1);
             obj.BpodSplashScreen(1);
         end
         function obj = InitializeHardware(obj, portString, varargin)
             if strcmp(portString, 'AUTO')
-                Ports = obj.FindArduinoPorts;
+                Ports = obj.FindUSBSerialPorts;
+                Ports = [Ports.Arduino Ports.Teensy];
             else
                 Ports = {portString};
             end
@@ -259,6 +278,13 @@ classdef BpodObject < handle
                 error('Error: Could not find Bpod device.');
             end
             disp(['Bpod connected on port ' Ports{thisPortIndex}])
+            if obj.SerialPort.UsePsychToolbox == 0
+                disp('###########################################################################')
+                disp('# NOTICE: Bpod is running without Psychtoolbox installed.                 #')
+                disp('# PsychToolbox integration greatly improves USB transfer speed + latency. #')
+                disp('# See http://psychtoolbox.org/download/ for installation instructions.    #')
+                disp('###########################################################################')
+            end
             obj.SystemSettings.LastCOMPort = Ports{thisPortIndex};
             obj.SaveSettings;
             obj.EmulatorMode = 0;
@@ -279,31 +305,31 @@ classdef BpodObject < handle
                 obj.HW.Outputs = 'UUUXSBBWWWPPPPPPPPGGG';
                 close(obj.GUIHandles.LaunchEmuFig);
                 disp('Connection aborted. Bpod started in Emulator mode.')
-                obj.FirmwareBuild = 9;
-                obj.MachineType = 1;
+                obj.FirmwareVersion = obj.CurrentFirmware.StateMachine;
+                obj.MachineType = 2;
                 nModules = sum(obj.HW.Outputs=='U');
                 obj.Modules.Connected = zeros(1,nModules);
                 obj.Modules.Name = cell(1,nModules);
                 obj.Modules.nSerialEvents = ones(1,nModules)*(obj.HW.n.MaxSerialEvents/(nModules+1));
                 obj.Modules.EventNames = cell(1,nModules);
                 obj.Modules.RelayActive = zeros(1,nModules);
+                obj.Modules.USBport = cell(1,nModules);
             else
                 % Get firmware version
                 obj.SerialPort.write('F', 'uint8');
-                obj.FirmwareBuild = obj.SerialPort.read(1, 'uint16');
+                obj.FirmwareVersion = obj.SerialPort.read(1, 'uint16');
                 obj.MachineType = obj.SerialPort.read(1, 'uint16');
-                currentFirmware = 14;
-                if obj.MachineType == 1
-                    if obj.FirmwareBuild ~= 5
-                        if obj.FirmwareBuild ~= currentFirmware
-                            obj.SerialPort.write('Z');
-                            obj.SerialPort = []; % Trigger the ArCOM port's destructor function (closes and releases port)
-                            if obj.FirmwareBuild < currentFirmware
-                                error('Old firmware detected. Please update Bpod firmware, restart MATLAB and try again.')
-                            else
-                                error('The firmware on the Bpod state machine is newer than your Bpod software for MATLAB. Please update your software and try again.')
-                            end
-                        end
+                if obj.FirmwareVersion ~= obj.CurrentFirmware.StateMachine
+                    obj.SerialPort.write('Z');
+                    obj.SerialPort = []; % Trigger the ArCOM port's destructor function (closes and releases port)
+                    if obj.FirmwareVersion < obj.CurrentFirmware.StateMachine
+                        disp([char(13) 'ERROR: Old state machine firmware detected, v' num2str(obj.FirmwareVersion) '. ' char(13)...
+                            'Please update the state machine firmware to v' num2str(obj.CurrentFirmware.StateMachine) ', restart MATLAB and try again.' char(13)...
+                            'The latest firmware is <a href="matlab:web(''https://github.com/sanworks/Bpod_Gen2/tree/master/Firmware/Gen2/State%20Machine'',''-browser'')">here</a>.' char(13) ...
+                            'Installation instructions are <a href="matlab:web(''https://sites.google.com/site/bpoddocumentation/firmware-update'',''-browser'')">here</a>.' char(13)]);
+                        error('Old firmware detected. See instructions above.');
+                    else
+                        error('The firmware on the Bpod state machine is newer than your Bpod software for MATLAB. Please update your MATLAB software from the Bpod repository and try again.')
                     end
                 end
                 % Request hardware description
@@ -328,10 +354,8 @@ classdef BpodObject < handle
                         obj.InputsEnabled(PortPos(1:3)) = 1;
                     end
                     obj.InputsEnabled(obj.HW.Inputs == 'B') = 1;
-                    if obj.MachineType == 1
-                        if obj.FirmwareBuild > 6 % Later versions use optoisolator for wire inputs - OK to activate
-                            obj.InputsEnabled(obj.HW.Inputs == 'W') = 1;
-                        end
+                    if obj.MachineType > 1 % v0.7+ uses optoisolators on wire channels; OK to enable by default
+                        obj.InputsEnabled(obj.HW.Inputs == 'W') = 1;
                     end
                 end
                 obj.SerialPort.write(['E' obj.InputsEnabled], 'uint8');
@@ -399,9 +423,14 @@ classdef BpodObject < handle
         end
         function obj = LoadModules(obj)
             if obj.EmulatorMode == 0 && obj.Status.BeingUsed == 0
-                
-                % Get info from modules
                 nModules = sum(obj.HW.Outputs=='U');
+                if isfield(obj.Modules, 'USBport')
+                    USBPairing = obj.Modules.USBport;
+                else
+                    USBPairing = cell(1,nModules);
+                end
+                % Get info from modules
+                obj.Modules.nModules = nModules;
                 obj.Modules.RelayActive = zeros(1,nModules);
                 obj.StopModuleRelay();
                 obj.Modules.Connected = zeros(1,nModules);
@@ -409,6 +438,7 @@ classdef BpodObject < handle
                 obj.Modules.FirmwareVersion = zeros(1,nModules);
                 obj.Modules.nSerialEvents = ones(1,nModules)*(floor(obj.HW.n.MaxSerialEvents/obj.HW.n.SerialChannels));
                 obj.Modules.EventNames = cell(1,nModules);
+                obj.Modules.USBport = USBPairing;
                 obj.SerialPort.write('M', 'uint8');
                 pause(.1);
                 messageLength = obj.SerialPort.bytesAvailable;
@@ -483,6 +513,31 @@ classdef BpodObject < handle
                     if Confirmed ~= 1
                         error('Error: State machine did not confirm module event reallocation');
                     end
+                    
+                    % Load module USB port configuration
+                    USBPorts = obj.FindUSBSerialPorts;
+                    USBPorts = [USBPorts.Arduino USBPorts.Teensy USBPorts.Sparkfun USBPorts.COM];
+                    USBPorts = USBPorts(logical(1-strcmp(USBPorts, obj.SerialPort.PortName)));
+
+                    for i = 1:length(obj.Modules.Name)
+                        USBPorts = USBPorts(logical(1-strcmp(USBPorts, obj.Modules.USBport{i})));
+                    end
+                    load(obj.Path.ModuleUSBConfig);
+                    for i = 1:obj.Modules.nModules
+                        ThisModuleName = obj.Modules.Name{i};
+                        ThisPortName = ModuleUSBConfig.USBPorts{i};
+                        ExpectedModuleName = ModuleUSBConfig.ModuleNames{i};
+                        if ~isempty(ThisModuleName) && ~isempty(ThisPortName) % If an entry exists
+                            if sum(strcmp(ThisPortName, USBPorts)) > 0 % If the USB port is detected
+                                if isempty(obj.Modules.USBport{i}) % If the module is unpaired
+                                    if strcmp(ThisModuleName, ExpectedModuleName)
+                                        obj.Modules.USBport{i} = ThisPortName;
+                                        obj.ModuleUSB.(ThisModuleName) = ThisPortName;
+                                    end
+                                end
+                            end
+                        end
+                    end
                 else
                     error('Error requesting module information: state machine did not return enough data.')
                 end
@@ -490,6 +545,33 @@ classdef BpodObject < handle
                     obj.SetupStateMachine;
                     obj.refreshGUIPanels;
                     obj.FixPushbuttons;
+                    if isfield(obj.GUIHandles, 'SystemInfoFig')
+                        if ishandle(obj.GUIHandles.SystemInfoFig) % If info figure is open
+                            close(obj.GUIHandles.SystemInfoFig);
+                            BpodSystemInfo;
+                            figure(obj.GUIHandles.MainFig);
+                        end
+                    end
+                end
+                for i = 1:nModules % Check for incompatible module firmware
+                    thisModuleName = obj.Modules.Name{i}(1:end-1);
+                    thisModuleFirmware = obj.Modules.FirmwareVersion(i);
+                    if ~isempty(thisModuleName)
+                        if isfield(obj.CurrentFirmware, thisModuleName)
+                            expectedFirmwareVersion = obj.CurrentFirmware.(thisModuleName);
+                            if thisModuleFirmware < expectedFirmwareVersion
+                                disp([char(13) 'ERROR: ' thisModuleName ' module with old firmware detected, v' num2str(thisModuleFirmware) '. ' char(13)...
+                                    'Please update its firmware to v' num2str(expectedFirmwareVersion) ', restart Bpod and try again.' char(13)...
+                                    'Firmware upgrade instructions are <a href="matlab:web(''https://sites.google.com/site/bpoddocumentation/firmware-update'',''-browser'')">here</a>.' char(13)]);
+                                BpodErrorSound;
+                                errordlg('Old module firmware detected. See instructions in the MATLAB command window.');
+                            elseif thisModuleFirmware > expectedFirmwareVersion
+                                Errormsg = ['The firmware on the ' thisModuleName ' module on serial port ' num2str(i) ' is newer than your Bpod software for MATLAB. ' char(13) 'Please update your MATLAB software from the Bpod repository and try again.'];
+                                errordlg(Errormsg)
+                                error(Errormsg);
+                            end                            
+                        end
+                    end
                 end
             end
         end
@@ -670,10 +752,10 @@ classdef BpodObject < handle
             sma.GlobalTimers = struct;
             sma.GlobalTimers.Duration = zeros(1,obj.HW.n.GlobalTimers);
             sma.GlobalTimers.OnsetDelay = zeros(1,obj.HW.n.GlobalTimers);
-            sma.GlobalTimers.LoopInterval = zeros(1,obj.HW.n.GlobalTimers);
             sma.GlobalTimers.OutputChannel = ones(1,obj.HW.n.GlobalTimers)*255; % Default channel code of 255 is "no channel".
             sma.GlobalTimers.OnMessage = zeros(1,obj.HW.n.GlobalTimers);
             sma.GlobalTimers.OffMessage = zeros(1,obj.HW.n.GlobalTimers);
+            sma.GlobalTimers.LoopInterval = zeros(1,obj.HW.n.GlobalTimers);
             sma.GlobalTimers.LoopMode = zeros(1,obj.HW.n.GlobalTimers); % Set to 1 if timer loops until canceled or trial-end
             sma.GlobalTimers.SendEvents = ones(1,obj.HW.n.GlobalTimers); % Set to 0 to disable global timer events (if looping at high freq)
             sma.GlobalTimers.IsSet = zeros(1,obj.HW.n.GlobalTimers); % Changed to 1 when the timer is set with SetGlobalTimer
@@ -702,12 +784,12 @@ classdef BpodObject < handle
                 TitleColor = [0.9 0 0];
             end
             if ispc
-                Vsm = 10; Sm = 12; Med = 13; Lg = 20;
+                Vvsm = 10; Vsm = 10; Sm = 12; Med = 13; Lg = 20;
             elseif ismac
-                Vsm = 14; Sm = 16; Med = 17; Lg = 22;
+                Vvsm = 12; Vsm = 14; Sm = 16; Med = 17; Lg = 22;
                 FontName = 'Arial';
             else
-                Vsm = 10; Sm = 12; Med = 13; Lg = 20;
+                Vvsm = 10; Vsm = 10; Sm = 12; Med = 13; Lg = 20;
             end
             
             obj.GUIHandles.MainFig = figure('Position',[80 100 825 400],'name','Bpod Console','numbertitle','off',...
@@ -721,28 +803,37 @@ classdef BpodObject < handle
             obj.GUIData.PauseButton = imread('PauseButton.bmp');
             obj.GUIData.PauseRequestedButton = imread('PauseRequestedButton.bmp');
             obj.GUIData.StopButton = imread('StopButton.bmp');
-            obj.GUIHandles.RunButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [742 120 60 60], 'Callback', 'RunProtocol(''StartPause'')', 'CData', obj.GUIData.GoButton, 'TooltipString', 'Launch behavior session');
-            obj.GUIHandles.EndButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [742 40 60 60], 'Callback', 'RunProtocol(''Stop'')', 'CData', obj.GUIData.StopButton, 'TooltipString', 'End session');
+            obj.GUIHandles.RunButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [742 100 60 60], 'Callback', 'RunProtocol(''StartPause'')', 'CData', obj.GUIData.GoButton, 'TooltipString', 'Launch behavior session');
+            obj.GUIHandles.EndButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [742 20 60 60], 'Callback', 'RunProtocol(''Stop'')', 'CData', obj.GUIData.StopButton, 'TooltipString', 'End session');
             
             obj.GUIData.OffButton = imread('ButtonOff.bmp');
             obj.GUIData.OffButtonDark = imread('ButtonOff_dark.bmp');
             obj.GUIData.OnButton = imread('ButtonOn.bmp');
             obj.GUIData.OnButtonDark = imread('ButtonOn_dark.bmp');
-            obj.GUIData.SoftTriggerButton = imread('BpodSoftTrigger.bmp');
-            obj.GUIData.SoftTriggerActiveButton = imread('BpodSoftTrigger_active.bmp');
             obj.GUIData.SettingsButton = imread('SettingsButton.bmp');
             obj.GUIData.RefreshButton = imread('RefreshButton.bmp');
+            obj.GUIData.USBButton = imread('USBButton.bmp');
+            obj.GUIData.SystemInfoButton = imread('SystemInfoButton.bmp');
             obj.GUIData.DocButton = imread('DocButton.bmp');
             obj.GUIData.AddProtocolButton = imread('AddProtocolIcon.bmp');
             obj.GUIHandles.SettingsButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [778 275 29 29], 'Callback', 'BpodSettingsMenu', 'CData', obj.GUIData.SettingsButton, 'TooltipString', 'Settings and calibration');
             obj.GUIHandles.RefreshButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [733 275 29 29], 'Callback', @(h,e)obj.LoadModules(), 'CData', obj.GUIData.RefreshButton, 'TooltipString', 'Refresh modules');
+            obj.GUIHandles.SystemInfoButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [778 227 29 29], 'Callback', 'BpodSystemInfo', 'CData', obj.GUIData.SystemInfoButton, 'TooltipString', 'View system info');
+            obj.GUIHandles.USBButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [733 227 29 29], 'Callback', 'ConfigureModuleUSB', 'CData', obj.GUIData.USBButton, 'TooltipString', 'Configure module USB ports');
             obj.GUIHandles.DocButton = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [796 371 29 29], 'Callback', @(h,e)obj.Wiki(), 'CData', obj.GUIData.DocButton, 'TooltipString', 'Documentation wiki');
-            text(735, 65,'Config', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
+            if ispc
+                CfgXpos = 735; Movpos = 335; Sesspos = 731;
+            elseif ismac
+                CfgXpos = 745; Movpos = 360; Sesspos = 741;
+            else
+                CfgXpos = 735; Movpos = 335; Sesspos = 731;
+            end
+            text(CfgXpos, 65,'Config', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
             line([730 815], [79 79], 'Color', LabelFontColor, 'LineWidth', 2);
-            text(335, 65,'Manual Override', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
+            text(Movpos, 65,'Manual Override', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
             line([145 718], [79 79], 'Color', LabelFontColor, 'LineWidth', 2);
-            text(731, 185,'Session', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
-            line([730 815], [200 200], 'Color', LabelFontColor, 'LineWidth', 2);
+            text(Sesspos, 205,'Session', 'FontName', FontName, 'FontSize', Med, 'Color', LabelFontColor);
+            line([730 815], [220 220], 'Color', LabelFontColor, 'LineWidth', 2);
             
             PluginPanelWidth = 575;
             PluginPanelOffset = 145;
@@ -763,7 +854,12 @@ classdef BpodObject < handle
                             CapPos = find(UCase);
                             NamePart1 = ThisModuleName(1:CapPos(2)-1);
                             NamePart2 = ThisModuleName(CapPos(2):end);
-                            NamePart2 = [NamePart2(1:end-1) ' ' NamePart2(end)];
+                            BufferLength = 5-length(NamePart2);
+                            if BufferLength < 1
+                                BufferLength = 0;
+                            end
+                            Buffer = ['<html>' repmat('&nbsp;', 1, BufferLength)];
+                            NamePart2 = [Buffer NamePart2(1:end-1) ' ' NamePart2(end)];
                             FormattedModuleNames{i} = ['<html>&nbsp;' NamePart1 '<br>' NamePart2];
                         else
                             ThisModuleName = [ThisModuleName(1:end-1) ' ' ThisModuleName(end)];
@@ -773,11 +869,10 @@ classdef BpodObject < handle
                         ThisModuleName = 'None';
                     end
                 end
-                
                 % Draw tab
-                obj.GUIHandles.PanelButton(i) = uicontrol('Style', 'pushbutton', 'String', FormattedModuleNames{i}, 'Callback', @(h,e)obj.SwitchPanels(i), 'BackgroundColor', [0.37 0.37 0.37], 'Position', [TabPos 272 TabWidth-1 49], 'ForegroundColor', [0.9 0.9 0.9], 'FontSize', 10, 'FontName', 'OCR A STD');
+                obj.GUIHandles.PanelButton(i) = uicontrol('Style', 'pushbutton', 'String', FormattedModuleNames{i}, 'Callback', @(h,e)obj.SwitchPanels(i), 'BackgroundColor', [0.37 0.37 0.37], 'Position', [TabPos 272 TabWidth-1 49], 'ForegroundColor', [0.9 0.9 0.9], 'FontSize', Vvsm, 'FontName', 'OCR A STD');
                 TabPos = TabPos + TabWidth;
-                if isempty(strfind(obj.HostOS, 'Linux')) && verLessThan('matlab','9.0')
+                if isempty(strfind(obj.HostOS, 'Linux'))
                     jButton = findjobj(obj.GUIHandles.PanelButton(i));
                     jButton.setBorderPainted(false);
                 end
@@ -790,14 +885,13 @@ classdef BpodObject < handle
                 obj.GUIHandles.OverridePanelAxes(i) = axes('Parent', obj.GUIHandles.OverridePanel(i), 'Position',[0 0 1 1], 'Color',[.37,.37,.37], 'Xlim', [0 PluginPanelWidth], 'Ylim', [0 250], 'UserData', 'PrimaryPanelAxes'); axis off;
                 uistack(obj.GUIHandles.OverridePanel(1),'top');
                 if i == 1 % State machine panel
-                    if obj.MachineType == 1
-                        if obj.FirmwareBuild < 8
+                    switch obj.MachineType
+                        case 1
                             StateMachinePanel_0_5; % This is a file in /Bpod/Functions/OverridePanels/
-                        else
+                        case 2
                             StateMachinePanel_0_7;
-                        end
-                    else
-                        StateMachinePanel_PSM_0_1;
+                        case 3
+                            StateMachinePanel_PSM_0_1;
                     end
                 else % Module panel
                     % Find module panel function and draw panel, otherwise draw default panel
@@ -832,18 +926,26 @@ classdef BpodObject < handle
                     TabPos = TabPos + TabWidth;
                     line([TabPos-1 TabPos-1], [82 130], 'Color', [0.45 0.45 0.45], 'LineWidth', 5);
                 end
-                if isempty(strfind(obj.HostOS, 'Linux')) && verLessThan('matlab','9.0')
+                if isempty(strfind(obj.HostOS, 'Linux'))
                     for i = 1:obj.HW.n.SerialChannels
                         jButton = findjobj(obj.GUIHandles.PanelButton(i));
                         jButton.setBorderPainted(false);
                     end
                 end
             end
-            obj.GUIHandles.CurrentStateDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 268 115 20], 'FontWeight', 'bold', 'FontSize', 9);
-            obj.GUIHandles.PreviousStateDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 219 115 20], 'FontWeight', 'bold', 'FontSize', 9);
-            obj.GUIHandles.LastEventDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 169 115 20], 'FontWeight', 'bold', 'FontSize', 9);
-            obj.GUIHandles.TimeDisplay = uicontrol('Style', 'text', 'String', '0', 'Position', [12 117 115 20], 'FontWeight', 'bold', 'FontSize', 9);
-            obj.GUIHandles.CxnDisplay = uicontrol('Style', 'text', 'String', 'Idle', 'Position', [12 65 115 20], 'FontWeight', 'bold', 'FontSize', 9); 
+            if ispc
+                InfoDispFontSize = 9; InfoDispBoxHeight = 20; InfoDispBoxWidth = 115; Ypos = 268;
+            elseif ismac
+                InfoDispFontSize = 12; InfoDispBoxHeight = 22; InfoDispBoxWidth = 115; Ypos = 264;
+            else
+                InfoDispFontSize = 7.5; InfoDispBoxHeight = 23; InfoDispBoxWidth = 120; Ypos = 268;
+            end
+            
+            obj.GUIHandles.CurrentStateDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 Ypos InfoDispBoxWidth InfoDispBoxHeight], 'FontWeight', 'bold', 'FontSize', InfoDispFontSize); Ypos = Ypos - 51;
+            obj.GUIHandles.PreviousStateDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 Ypos InfoDispBoxWidth InfoDispBoxHeight], 'FontWeight', 'bold', 'FontSize', InfoDispFontSize); Ypos = Ypos - 51;
+            obj.GUIHandles.LastEventDisplay = uicontrol('Style', 'text', 'String', 'None', 'Position', [12 Ypos InfoDispBoxWidth InfoDispBoxHeight], 'FontWeight', 'bold', 'FontSize', InfoDispFontSize); Ypos = Ypos - 51;
+            obj.GUIHandles.TimeDisplay = uicontrol('Style', 'text', 'String', '0', 'Position', [12 Ypos InfoDispBoxWidth InfoDispBoxHeight], 'FontWeight', 'bold', 'FontSize', InfoDispFontSize); Ypos = Ypos - 51;
+            obj.GUIHandles.CxnDisplay = uicontrol('Style', 'text', 'String', 'Idle', 'Position', [12 Ypos InfoDispBoxWidth InfoDispBoxHeight], 'FontWeight', 'bold', 'FontSize', InfoDispFontSize); 
             obj.FixPushbuttons;
             text(15, 30, Title, 'FontName', TitleFontName, 'FontSize', Lg, 'Color', TitleColor);
             line([280 770], [30 30], 'Color', LabelFontColor, 'LineWidth', 4);
@@ -869,7 +971,12 @@ classdef BpodObject < handle
                             CapPos = find(UCase);
                             NamePart1 = ThisModuleName(1:CapPos(2)-1);
                             NamePart2 = ThisModuleName(CapPos(2):end);
-                            NamePart2 = [NamePart2(1:end-1) ' ' NamePart2(end)];
+                            BufferLength = 5-length(NamePart2);
+                            if BufferLength < 1
+                                BufferLength = 0;
+                            end
+                            Buffer = ['<html>' repmat('&nbsp;', 1, BufferLength)];
+                            NamePart2 = [Buffer NamePart2(1:end-1) ' ' NamePart2(end)];
                             FormattedModuleNames{i} = ['<html>&nbsp;' NamePart1 '<br>' NamePart2];
                         else
                             ThisModuleName = [ThisModuleName(1:end-1) ' ' ThisModuleName(end)];
@@ -928,7 +1035,7 @@ classdef BpodObject < handle
                 uistack(obj.GUIHandles.OverridePanel(1),'top');
                 axes(obj.GUIHandles.Console);
                 uistack(obj.GUIHandles.Console,'bottom');
-                if isempty(strfind(obj.HostOS, 'Linux')) && verLessThan('matlab','9.0')
+                if isempty(strfind(obj.HostOS, 'Linux'))
                     for i = 1:obj.HW.n.SerialChannels
                         jButton = findjobj(obj.GUIHandles.PanelButton(i));
                         jButton.setBorderPainted(false);
@@ -1024,13 +1131,18 @@ classdef BpodObject < handle
             obj.LastHardwareState = obj.HardwareState;
         end
         function obj = setupFolders(obj)
-            obj.GUIHandles.FolderConfigFig = figure('Position', [350 480 600 130],'name','Setup folders','numbertitle','off', 'MenuBar', 'none', 'Resize', 'off');
+            if ispc
+                FigHeight = 130; Label1Ypos = 28; Label2Ypos = 68;
+            else
+                FigHeight = 150; Label1Ypos = 38; Label2Ypos = 75;
+            end
+            obj.GUIHandles.FolderConfigFig = figure('Position', [350 480 600 FigHeight],'name','Setup folders','numbertitle','off', 'MenuBar', 'none', 'Resize', 'off');
             ha = axes('units','normalized', 'position',[0 0 1 1]);
             uistack(ha,'bottom');
             BG = imread('SettingsMenuBG2.bmp');
-            image(BG); axis off; drawnow;
-            text(10, 28,'Protocols', 'FontName', 'OCRAStd', 'FontSize', 13, 'Color', [0.8 0.8 0.8]);
-            text(10, 68,'Data Root', 'FontName', 'OCRAStd', 'FontSize', 13, 'Color', [0.8 0.8 0.8]);
+            imagesc(BG); axis off; drawnow;
+            text(10, Label1Ypos,'Protocols','Parent', ha , 'FontName', 'OCRAStd', 'FontSize', 13, 'Color', [0.8 0.8 0.8]);
+            text(10, Label2Ypos,'Data Root','Parent', ha , 'FontName', 'OCRAStd', 'FontSize', 13, 'Color', [0.8 0.8 0.8]);
             if isfield(obj.SystemSettings, 'ProtocolFolder')
                 if isempty(obj.SystemSettings.ProtocolFolder)
                     ProtocolPath = fullfile(obj.Path.LocalDir, 'Protocols',filesep);
@@ -1050,11 +1162,11 @@ classdef BpodObject < handle
                 DataPath = fullfile(obj.Path.LocalDir, 'Data',filesep);
             end
             ImportButtonGFX = imread('ImportButton.bmp');
-            obj.GUIHandles.setupFoldersButton = uicontrol('Style', 'pushbutton', 'String', 'Ok', 'Position', [270 10 60 25], 'Callback', @(h,e)obj.setFolders(), 'BackgroundColor', [.4 .4 .4], 'ForegroundColor', [1 1 1]);
-            obj.GUIHandles.dataFolderEdit = uicontrol('Style', 'edit', 'String', DataPath, 'Position', [140 50 410 25], 'HorizontalAlignment', 'Left', 'BackgroundColor', [.8 .8 .8], 'FontSize', 10, 'FontName', 'Arial');
-            obj.GUIHandles.dataFolderNav = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [560 50 25 25], 'BackgroundColor', [.8 .8 .8], 'CData', ImportButtonGFX, 'Callback', @(h,e)obj.folderSetupUIGet('Data'));
-            obj.GUIHandles.protocolFolderEdit = uicontrol('Style', 'edit', 'String', ProtocolPath, 'Position', [140 90 410 25], 'HorizontalAlignment', 'Left', 'BackgroundColor', [.8 .8 .8], 'FontSize', 10, 'FontName', 'Arial');
-            obj.GUIHandles.protocolFolderNav = uicontrol('Style', 'pushbutton', 'String', '', 'Position', [560 90 25 25], 'BackgroundColor', [.8 .8 .8], 'CData', ImportButtonGFX, 'Callback', @(h,e)obj.folderSetupUIGet('Protocol'));
+            obj.GUIHandles.setupFoldersButton = uicontrol(obj.GUIHandles.FolderConfigFig, 'Style', 'pushbutton', 'String', 'Ok', 'Position', [270 10 60 25], 'Callback', @(h,e)obj.setFolders(), 'BackgroundColor', [.4 .4 .4], 'ForegroundColor', [1 1 1]);
+            obj.GUIHandles.dataFolderEdit = uicontrol(obj.GUIHandles.FolderConfigFig, 'Style', 'edit', 'String', DataPath, 'Position', [140 50 410 25], 'HorizontalAlignment', 'Left', 'BackgroundColor', [.8 .8 .8], 'FontSize', 10, 'FontName', 'Arial');
+            obj.GUIHandles.dataFolderNav = uicontrol(obj.GUIHandles.FolderConfigFig, 'Style', 'pushbutton', 'String', '', 'Position', [560 50 25 25], 'BackgroundColor', [.8 .8 .8], 'CData', ImportButtonGFX, 'Callback', @(h,e)obj.folderSetupUIGet('Data'));
+            obj.GUIHandles.protocolFolderEdit = uicontrol(obj.GUIHandles.FolderConfigFig, 'Style', 'edit', 'String', ProtocolPath, 'Position', [140 90 410 25], 'HorizontalAlignment', 'Left', 'BackgroundColor', [.8 .8 .8], 'FontSize', 10, 'FontName', 'Arial');
+            obj.GUIHandles.protocolFolderNav = uicontrol(obj.GUIHandles.FolderConfigFig, 'Style', 'pushbutton', 'String', '', 'Position', [560 90 25 25], 'BackgroundColor', [.8 .8 .8], 'CData', ImportButtonGFX, 'Callback', @(h,e)obj.folderSetupUIGet('Protocol'));
         end
         function obj = folderSetupUIGet(obj, type)
             switch type
@@ -1168,41 +1280,52 @@ classdef BpodObject < handle
             end
         end
         
-        function delete(obj) % Destructor
-            obj.SerialPort = []; % Trigger the ArCOM port's destructor function (closes and releases port)
-            stop(obj.Timers.PortRelayTimer);
-            delete(obj.Timers.PortRelayTimer);
-        end
-    end
-    methods (Access = private)
-        function ArduinoPorts = FindArduinoPorts(obj)
+        function USBSerialPorts = FindUSBSerialPorts(obj)
+            SerialPortKeywords = {'Arduino', 'Teensy', 'Sparkfun', 'COM'};
+            nKeywords = length(SerialPortKeywords);
+            USBSerialPorts = struct;
             if ispc
-                [Status RawString] = system('wmic path Win32_SerialPort Where "Caption LIKE ''%Arduino%''" Get DeviceID'); % Search for Arduino on USB Serial
-                [Status RawString2] = system('wmic path Win32_SerialPort Where "Caption LIKE ''%Teensy%''" Get DeviceID'); % Search for Teensy on USB Serial
-                RawString = [RawString RawString2];
-                PortLocations = strfind(RawString, 'COM');
-                ArduinoPorts = cell(1,100);
-                nPorts = length(PortLocations);
-                for x = 1:nPorts
-                    Clip = RawString(PortLocations(x):PortLocations(x)+6);
-                    ArduinoPorts{x} = Clip(1:find(Clip == 32,1, 'first')-1);
+                for k = 1:nKeywords
+                    [Status RawString] = system(['wmic path Win32_SerialPort Where "Caption LIKE ''%' SerialPortKeywords{k} '%''" Get DeviceID']);
+                    PortLocations = strfind(RawString, 'COM');
+                    nPorts = length(PortLocations);
+                    USBSerialPorts.(SerialPortKeywords{k}) = cell(1,100);
+                    nPortsAdded = 0;
+                    for p = 1:nPorts
+                        Clip = RawString(PortLocations(p):PortLocations(p)+6);
+                        CandidatePort = Clip(1:find(Clip == 32,1, 'first')-1);
+                        if ~strcmp(CandidatePort, 'COM1')
+                            if sum(strcmp(CandidatePort, USBSerialPorts.(SerialPortKeywords{k}))) == 0
+                                nPortsAdded = nPortsAdded + 1;
+                                USBSerialPorts.(SerialPortKeywords{k}){nPortsAdded} = CandidatePort;
+                            end
+                        end
+                    end
+                    USBSerialPorts.(SerialPortKeywords{k}) = USBSerialPorts.(SerialPortKeywords{k})(1:nPortsAdded);
                 end
-                ArduinoPorts = ArduinoPorts(1:nPorts);
             elseif ismac % Contributed by Thiago Gouvea JUN_9_2016
-                [trash, RawSerialPortList] = system('ls /dev/tty.usbmodem*');
+                [trash, RawSerialPortList] = system('ls /dev/cu.usbmodem*');
                 string = strtrim(RawSerialPortList);
-                PortStringPositions = strfind(string, '/dev/tty.usbmodem');
+                PortStringPositions = strfind(string, '/dev/cu.usbmodem');
+                StringEnds = find(string == 9);
                 nPorts = length(PortStringPositions);
                 CandidatePorts = cell(1,nPorts);
                 nGoodPorts = 0;
                 for x = 1:nPorts
-                    if PortStringPositions(x)+20 <= length(string)
-                        CandidatePort = strtrim(string(PortStringPositions(x):PortStringPositions(x)+20));
-                        nGoodPorts = nGoodPorts + 1;
-                        CandidatePorts{nGoodPorts} = CandidatePort;
+                    if x < nPorts && nPorts > 1
+                        CandidatePort = string(PortStringPositions(x):StringEnds(x)-1);
+                    elseif x == nPorts
+                        CandidatePort = string(PortStringPositions(x):end);
+                    end
+                    nGoodPorts = nGoodPorts + 1;
+                    CandidatePorts{nGoodPorts} = CandidatePort;
+                end
+                USBSerialPorts.(SerialPortKeywords{1}) = CandidatePorts(1:nGoodPorts);
+                if nKeywords > 1
+                    for i = 2:nKeywords
+                        USBSerialPorts.(SerialPortKeywords{i}) = '';
                     end
                 end
-                ArduinoPorts = CandidatePorts(1:nGoodPorts);
             else
                 [trash, RawSerialPortList] = system('ls /dev/ttyACM*');
                 string = strtrim(RawSerialPortList);
@@ -1217,10 +1340,22 @@ classdef BpodObject < handle
                         CandidatePorts{nGoodPorts} = CandidatePort;
                     end
                 end
-                ArduinoPorts = CandidatePorts(1:nGoodPorts);
+                USBSerialPorts.(SerialPortKeywords{1}) = CandidatePorts(1:nGoodPorts);
+                if nKeywords > 1
+                    for i = 2:nKeywords
+                        USBSerialPorts.(SerialPortKeywords{i}) = '';
+                    end
+                end
             end
         end
         
+        function delete(obj) % Destructor
+            obj.SerialPort = []; % Trigger the ArCOM port's destructor function (closes and releases port)
+            stop(obj.Timers.PortRelayTimer);
+            delete(obj.Timers.PortRelayTimer);
+        end
+    end
+    methods (Access = private)      
         function SwitchPanels(obj, panel)
             obj.GUIData.CurrentPanel = 0;
             OffPanels = 1:obj.HW.n.SerialChannels;
@@ -1233,7 +1368,7 @@ classdef BpodObject < handle
                 set(obj.GUIHandles.OverridePanel(i), 'Visible', 'off');
             end
             set(obj.GUIHandles.PanelButton(panel), 'BackgroundColor', [0.45 0.45 0.45]);
-            if isempty(strfind(obj.HostOS, 'Linux')) && verLessThan('matlab','9.0') % Fix buttons if not on linux
+            if isempty(strfind(obj.HostOS, 'Linux')) % Fix buttons if not on linux
                 for i = 1:obj.HW.n.SerialChannels
                     jButton = findjobj(obj.GUIHandles.PanelButton(i));
                     jButton.setBorderPainted(false);
