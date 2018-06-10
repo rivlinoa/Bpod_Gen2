@@ -59,6 +59,7 @@ BpodParameterGUI('init', S); % Initialize parameter GUI plugin
 %% Main trial loop
 for currentTrial = 1:MaxTrials
     S = BpodParameterGUI('sync', S); % Sync parameters with BpodParameterGUI plugin
+    
     R = GetValveTimes(S.GUI.RewardAmount, [1 3]); LeftValveTime = R(1); RightValveTime = R(2); % Update reward amounts
     switch TrialTypes(currentTrial) % Determine trial-specific state matrix fields
         case 1

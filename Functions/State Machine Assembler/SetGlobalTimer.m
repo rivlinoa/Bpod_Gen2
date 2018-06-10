@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Sanworks Bpod repository
-Copyright (C) 2016 Sanworks LLC, Sound Beach, New York, USA
+Copyright (C) 2017 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -10,8 +10,8 @@ This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, version 3.
 
-This program is distributed  WITHOUT ANY WARRANTY and without even the 
-implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
@@ -41,7 +41,7 @@ global BpodSystem
 % LoopMode = 0 if a one-shot timer, 1 if the timer loops until stopped with the GlobalTimerCancel action (or trial end)
 % SendEvents = 0 to disable wave onset and offset events (useful if looping at high frequency to control something)
 % LoopInterval = Configurable interval between global timer loop iterations (default = 0s). 
-%
+% TimerOn_Trigger = An integer whose bits indicate other global timers to trigger when the timer turns on.
 %
 % Example usage:
 % sma = SetGlobalTimer(sma, 1, 0.025); % sets timer 1 for 25ms (legacy syntax supported)
@@ -79,7 +79,7 @@ if nargin > 8
         OutputChannelIndex = find(strcmp(TimerOutputChannel,BpodSystem.StateMachineInfo.OutputChannelNames));
     end
     if isempty(OutputChannelIndex)
-        error(['Error: ' TimerOutputChannel ' is not a valid output channel. Valid channels are: ' BpodSystem.StateMachineInfo.OutputChannelNames]);
+        error(['Error: ''' TimerOutputChannel ''' is not a valid output channel.' char(10) 'Check list of valid channels from Bpod console.']);
     end
 else
     OutputChannelIndex = 255;
@@ -89,6 +89,7 @@ OffMessage = 0;
 LoopMode = 0;
 SendEvents = 1;
 LoopInterval = 0;
+OnTriggerByte = 0;
 if nargin > 10
     OnMessage = varargin{9};
 end
@@ -104,6 +105,18 @@ end
 if nargin > 18
     LoopInterval = varargin{17};
 end
+if nargin > 20
+    OnTriggerByte = varargin{19};
+end
+
+ if ischar(OnTriggerByte) 
+        if (sum(OnTriggerByte == '0') + sum(OnTriggerByte == '1')) == length(OnTriggerByte) % Assume binary string, convert to decimal
+            OnTriggerByte = bin2dec(OnTriggerByte);
+        else
+            OnTriggerByte = 2^(OnTriggerByte-1); % Assume single channel
+        end
+ end
+
 sma.GlobalTimers.OnsetDelay(TimerID) = OnsetDelay;
 sma.GlobalTimers.OutputChannel(TimerID) = OutputChannelIndex;
 sma.GlobalTimers.OnMessage(TimerID) = OnMessage;
@@ -111,4 +124,5 @@ sma.GlobalTimers.OffMessage(TimerID) = OffMessage;
 sma.GlobalTimers.LoopMode(TimerID) = LoopMode;
 sma.GlobalTimers.SendEvents(TimerID) = SendEvents;
 sma.GlobalTimers.LoopInterval(TimerID) = LoopInterval;
+sma.GlobalTimers.TimerOn_Trigger(TimerID) = OnTriggerByte;
 sma.GlobalTimers.IsSet(TimerID) = 1;

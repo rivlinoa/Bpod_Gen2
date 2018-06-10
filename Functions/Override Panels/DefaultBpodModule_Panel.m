@@ -1,3 +1,22 @@
+%{
+----------------------------------------------------------------------------
+
+This file is part of the Sanworks Bpod repository
+Copyright (C) 2017 Sanworks LLC, Stony Brook, New York, USA
+
+----------------------------------------------------------------------------
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3.
+
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+%}
 function DefaultBpodModule_Panel(PanelHandle, ModuleName)
 global BpodSystem
 
@@ -5,10 +24,19 @@ FontName = 'OCR A STD';
 if ismac
     FontName = 'Arial';
 end
-BpodSystem.GUIData.InputFontSize = 10;
-BpodSystem.GUIData.InstructionFontSize = 8;
-if isunix
+
+if ispc
+    BpodSystem.GUIData.InstructionFontSize = 8;
+    BpodSystem.GUIData.InputFontSize = 10;
+    BpodSystem.GUIData.TitleFontSize = 12;
+elseif ismac
+    BpodSystem.GUIData.InstructionFontSize = 11;
+    BpodSystem.GUIData.InputFontSize = 12;
+    BpodSystem.GUIData.TitleFontSize = 16;
+else
     BpodSystem.GUIData.InstructionFontSize = 7;
+    BpodSystem.GUIData.InputFontSize = 10;
+    BpodSystem.GUIData.TitleFontSize = 12;
 end
 BpodSystem.GUIData.SelectedTermDisplayMode = 1;
 
@@ -17,7 +45,7 @@ ModuleNumber = find(strcmp(ModuleName, BpodSystem.Modules.Name));
 xOffset = 120;
 yOffset = 130;
 Label = ['Module ' num2str(ModuleNumber) ' Serial Terminal'];
-text(xOffset+25, yOffset+80, Label, 'FontName', FontName, 'FontSize', 12, 'Color', [.8 .8 .8]);
+text(xOffset+25, yOffset+80, Label, 'FontName', FontName, 'FontSize', BpodSystem.GUIData.TitleFontSize, 'Color', [.8 .8 .8]);
 line([xOffset-30 xOffset+360], [yOffset+65 yOffset+65], 'Color', [.8 .8 .8], 'LineWidth', 2);
 xPos = xOffset;
 ByteModeInstructions = 'Spaces delimit bytes, use '' '' for char i.e. ''A'' 5 213 ''B''';
@@ -33,11 +61,13 @@ BpodSystem.GUIHandles.SerialTerminalInput(ModuleNumber) = uicontrol('Parent', Pa
     'ButtonDownFcn',@(src,event)ClearInstructions(ModuleNumber));
 BpodSystem.GUIHandles.SerialTerminalOutput(ModuleNumber) = uicontrol('Parent', PanelHandle,'Style', 'edit',...
     'String', '', 'Position', [xPos-30 yOffset-100 275 90],...
-    'HorizontalAlignment', 'left', 'Enable', 'inactive', 'Max', 3);
+    'HorizontalAlignment', 'left', 'Enable', 'inactive', 'Max', 3, 'FontSize', BpodSystem.GUIData.InputFontSize);
 BpodSystem.GUIHandles.SerialTerminalButton(ModuleNumber) = uicontrol('Parent', PanelHandle,'Style', 'pushbutton',...
-    'String', 'Send', 'Position', [xPos+258 yOffset 100 30], 'Callback', @(src,event)SendMessage(ModuleNumber, ModuleName));
+    'String', 'Send', 'Position', [xPos+258 yOffset 100 30], 'Callback', @(src,event)SendMessage(ModuleNumber, ModuleName),...
+    'ForegroundColor', [1 1 1], 'BackgroundColor', [0.5 0.5 0.5]);
 BpodSystem.GUIHandles.SerialTerminalClearButton(ModuleNumber) = uicontrol('Parent', PanelHandle,'Style', 'pushbutton',...
-    'String', 'Clear', 'Position', [xPos+258 yOffset-40 100 30], 'Callback', @(src,event)ClearTerminal(ModuleNumber));
+    'String', 'Clear', 'Position', [xPos+258 yOffset-40 100 30], 'Callback', @(src,event)ClearTerminal(ModuleNumber),...
+    'ForegroundColor', [1 1 1], 'BackgroundColor', [0.5 0.5 0.5]);
 BpodSystem.GUIHandles.SerialTerminalCharSelect(ModuleNumber) = uicontrol('Parent', PanelHandle, 'Style', 'radiobutton', ...
                            'Callback', @(src,event)SelectCharmode(ModuleNumber), ...
                            'Units',    'pixels', ...
@@ -70,7 +100,7 @@ if strcmp(Character,'return')
     import java.awt.event.KeyEvent;
     robot=Robot;
     robot.keyPress(KeyEvent.VK_ENTER);
-    pause(0.01)
+    pause(0.03)
     robot.keyRelease(KeyEvent.VK_ENTER);
     SendMessage(ModuleNumber,ModuleName);
 end

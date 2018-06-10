@@ -1,8 +1,8 @@
 %{
 ----------------------------------------------------------------------------
 
-This file is part of the Bpod Project
-Copyright (C) 2014 Joshua I. Sanders, Cold Spring Harbor Laboratory, NY, USA
+This file is part of the Sanworks Bpod repository
+Copyright (C) 2017 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -10,8 +10,8 @@ This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, version 3.
 
-This program is distributed  WITHOUT ANY WARRANTY and without even the 
-implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
@@ -49,6 +49,30 @@ switch Op
         if isfield(Params, 'GUIPanels')
             Panels = Params.GUIPanels;
             PanelNames = fieldnames(Panels);
+            nPanels = length(PanelNames);
+            paramNames = fieldnames(Params.GUI);
+            nParameters = length(paramNames);
+            paramPanels = zeros(1,nParameters);
+            % Find any params not assigned a panel and assign to
+            % new 'Parameters' panel
+            paramsInPanels = {}; 
+            for i = 1:nPanels
+                paramsInPanels = [paramsInPanels Panels.(PanelNames{i})];
+            end
+            paramsInDefaultPanel = {};
+            
+            for i = 1:nParameters
+                if ~strcmp(paramNames{i}, paramsInPanels)
+                    paramsInDefaultPanel = [paramsInDefaultPanel paramNames{i}];
+                end
+            end
+            if ~isempty(paramsInDefaultPanel)
+                Panels.Parameters = cell(1,length(paramsInDefaultPanel));
+                for i = 1:length(paramsInDefaultPanel)
+                    Panels.Parameters{i} = paramsInDefaultPanel{i};
+                end
+                PanelNames{nPanels+1} = 'Parameters';
+            end
             nPanels = length(PanelNames);
         else
             Panels = struct;
@@ -154,16 +178,17 @@ switch Op
             ThisParamStyle = BpodSystem.GUIData.ParameterGUI.Styles(p);
             ThisParamHandle = BpodSystem.GUIHandles.ParameterGUI.Params(p);
             ThisParamLastValue = BpodSystem.GUIData.ParameterGUI.LastParamValues{p};
+            ThisParamCurrentValue = Params.GUI.(ThisParamName); % Use single precision to avoid problems with ==
             switch ThisParamStyle
                 case 1 % Edit
                     GUIParam = str2double(get(ThisParamHandle, 'String'));
-                    if GUIParam ~= ThisParamLastValue
+                    if single(GUIParam) ~= single(ThisParamLastValue)
                         Params.GUI.(ThisParamName) = GUIParam;
-                    elseif Params.GUI.(ThisParamName) ~= ThisParamLastValue
-                        set(ThisParamHandle, 'String', num2str(GUIParam));
+                    elseif single(ThisParamCurrentValue) ~= single(ThisParamLastValue)
+                        set(ThisParamHandle, 'String', num2str(ThisParamCurrentValue));
                     end
                 case 2 % Text
-                    GUIParam = Params.GUI.(ThisParamName);
+                    GUIParam = ThisParamCurrentValue;
                     Text = GUIParam;
                     if ~ischar(Text)
                         Text = num2str(Text);
@@ -173,22 +198,23 @@ switch Op
                     GUIParam = get(ThisParamHandle, 'Value');
                     if GUIParam ~= ThisParamLastValue
                         Params.GUI.(ThisParamName) = GUIParam;
-                    elseif Params.GUI.(ThisParamName) ~= ThisParamLastValue
-                        set(ThisParamHandle, 'Value', GUIParam);
+                    elseif ThisParamCurrentValue ~= ThisParamLastValue
+                        set(ThisParamHandle, 'Value', ThisParamCurrentValue);
                     end
                 case 4 % Popupmenu
                     GUIParam = get(ThisParamHandle, 'Value');
                     if GUIParam ~= ThisParamLastValue
                         Params.GUI.(ThisParamName) = GUIParam;
-                    elseif Params.GUI.(ThisParamName) ~= ThisParamLastValue
-                        set(ThisParamHandle, 'Value', GUIParam);
+                    elseif ThisParamCurrentValue ~= ThisParamLastValue
+                        set(ThisParamHandle, 'Value', ThisParamCurrentValue);
                     end
             end
             if ThisParamStyle ~= 5
-                BpodSystem.GUIData.ParameterGUI.LastParamValues{p} = GUIParam;
+                BpodSystem.GUIData.ParameterGUI.LastParamValues{p} = Params.GUI.(ThisParamName);
             end
         end
     otherwise
     error('ParameterGUI must be called with a valid op code: ''init'' or ''sync''');
 end
+drawnow;
 varargout{1} = Params;

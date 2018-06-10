@@ -1,8 +1,8 @@
 %{
 ----------------------------------------------------------------------------
 
-This file is part of the Sanworks ArCOM repository
-Copyright (C) 2016 Sanworks LLC, Sound Beach, New York, USA
+This file is part of the Sanworks Bpod repository
+Copyright (C) 2018 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -55,6 +55,7 @@ classdef ArCOMObject_Bpod < handle
         UseOctave
         UsePsychToolbox
         validDataTypes
+        PortName
     end
     methods
         function obj = ArCOMObject_Bpod(portString, baudRate, varargin)
@@ -108,16 +109,31 @@ classdef ArCOMObject_Bpod < handle
                 end
             end
             obj.validDataTypes = {'char', 'uint8', 'uint16', 'uint32', 'int8', 'int16', 'int32'};
+            % If PortString is an IP address, set Interface to 3 or 4 (TCP/IP via Instrument Control or Psych Toolbox)
+            if (portString(1) > 47) && (portString(1) < 58) && sum(portString == '.') > 2
+                v = ver;
+                hasITC = any(strcmp(cellstr(char(v.Name)), 'Instrument Control Toolbox'));
+                if hasITC == 0
+                    if obj.UsePsychToolbox == 0
+                        error ('Error: You must install PsychToolbox or MATLAB Instrument Control Toolbox to connect to a Bpod state machine via Ethernet.')
+                    else
+                        obj.Interface = 4;
+                    end
+                else
+                   obj.Interface = 3; 
+                end 
+            end
+            originalPortString = portString;
             switch obj.Interface
                 case 0
-                    obj.Port = serial(portString, 'BaudRate', 115200, 'Timeout', 1,'OutputBufferSize', 100000, 'InputBufferSize', 100000, 'DataTerminalReady', 'on', 'tag', 'ArCOM');
+                    obj.Port = serial(portString, 'BaudRate', 115200, 'Timeout', 3,'OutputBufferSize', 1000000, 'InputBufferSize', 1000000, 'DataTerminalReady', 'on', 'tag', 'ArCOM');
                     fopen(obj.Port);
                 case 1
                     if ispc
                         portString = ['\\.\' portString];
                     end
                     IOPort('Verbosity', 0);
-                    obj.Port = IOPort('OpenSerialPort', portString, 'BaudRate=115200, OutputBufferSize=1000000, InputBufferSize=1000000, DTR=1');
+                    obj.Port = IOPort('OpenSerialPort', portString, 'ReceiveTimeout=3, BaudRate=115200, OutputBufferSize=1000000, InputBufferSize=1000000, DTR=1');
                     if (obj.Port < 0)
                         try
                             IOPort('Close', obj.Port);
@@ -137,7 +153,31 @@ classdef ArCOMObject_Bpod < handle
                     obj.Port = serial(portString, 115200,  1);
                     pause(.2);
                     srl_flush(obj.Port);
+                case 3
+                    obj.Port = tcpip(portString,11258, 'InputBufferSize', 1000000, 'OutputBufferSize', 1000000, 'Timeout', 3);
+                    fopen(obj.Port);
+                    pause(.1);
+                    fwrite(obj.Port,'H', 'uint8');
+                    ConnConfirmed = logical(fread(obj.Port, 1, 'uint8'));
+                    if ~ConnConfirmed
+                        fclose(obj.Port);
+                        delete(obj.Port);
+                        error(['Error: Could not connect to server at ' portString])
+                    end
+                case 4
+                    obj.Port = pnet('tcpconnect',portString,11258);
+                    pause(.1);
+                    pnet(obj.Port,'setwritetimeout',3);
+                    pnet(obj.Port,'setreadtimeout',3);
+                    pnet(obj.Port,'write', 'H')
+                    ConnConfirmed = logical(uint8(pnet(obj.Port,'read', 1)));
+                    if ~ConnConfirmed
+                        fclose(obj.Port);
+                        delete(obj.Port);
+                        error(['Error: Could not connect to server at ' portString])
+                    end
             end
+            obj.PortName = originalPortString;
         end
         function bytesAvailable = bytesAvailable(obj)
             switch obj.Interface
@@ -147,6 +187,10 @@ classdef ArCOMObject_Bpod < handle
                     bytesAvailable = IOPort('BytesAvailable', obj.Port);
                 case 2 % Octave
                     error('Reading available bytes from a serial port buffer is not supported in Octave as of instrument control toolbox 0.2.2');
+                case 3
+                    bytesAvailable = obj.Port.BytesAvailable;
+                case 4
+                    bytesAvailable = length(pnet(obj.Port,'read', 65536, 'uint8', 'native','view', 'noblock'));
             end
         end
         function write(obj, varargin)
@@ -213,6 +257,9 @@ classdef ArCOMObject_Bpod < handle
                         end
                         ByteString(ByteStringPos:ByteStringPos+DataLength(i)-1) = typecast(uint32(data), 'uint8');
                         ByteStringPos = ByteStringPos + DataLength(i);
+                    case 'uint64'
+                        ByteString(ByteStringPos:ByteStringPos+DataLength(i)-1) = typecast(uint64(data), 'uint8');
+                        ByteStringPos = ByteStringPos + DataLength(i);
                     case 'int8'
                         if sum((data < -128)+(data > 127)) > 0
                             error('Error: a signed 8-bit integer was out of range: -128 to 127')
@@ -231,6 +278,9 @@ classdef ArCOMObject_Bpod < handle
                         end
                         ByteString(ByteStringPos:ByteStringPos+DataLength(i)-1) = typecast(int32(data), 'uint8');
                         ByteStringPos = ByteStringPos + DataLength(i);
+                    case 'int64'
+                        ByteString(ByteStringPos:ByteStringPos+DataLength(i)-1) = typecast(int64(data), 'uint8');
+                        ByteStringPos = ByteStringPos + DataLength(i);
                     otherwise
                         error(['The datatype ' dataType ' is not currently supported by ArCOM.']);
                 end
@@ -242,6 +292,10 @@ classdef ArCOMObject_Bpod < handle
                     IOPort('Write', obj.Port, ByteString, 1);
                 case 2
                     srl_write(obj.Port, char(ByteString));
+                case 3
+                    fwrite(obj.Port, ['R' typecast(uint32(length(ByteString)), 'uint8'), ByteString]);
+                case 4
+                    pnet(obj.Port,'write', uint8(['R' typecast(uint32(length(ByteString)), 'uint8'), ByteString]));
             end
         end
         function varargout = read(obj, varargin)
@@ -266,12 +320,16 @@ classdef ArCOMObject_Bpod < handle
                         nTotalBytes = nTotalBytes + nValues(i)*2;
                     case 'uint32'
                         nTotalBytes = nTotalBytes + nValues(i)*4;
+                    case 'uint64'
+                        nTotalBytes = nTotalBytes + nValues(i)*8;
                     case 'int8'
                         nTotalBytes = nTotalBytes + nValues(i);
                     case 'int16'
                         nTotalBytes = nTotalBytes + nValues(i)*2;
                     case 'int32'
                         nTotalBytes = nTotalBytes + nValues(i)*4;
+                    case 'int64'
+                        nTotalBytes = nTotalBytes + nValues(i)*8;
                 end
             end
             switch obj.Interface
@@ -281,6 +339,10 @@ classdef ArCOMObject_Bpod < handle
                     ByteString = IOPort('Read', obj.Port, 1, nTotalBytes);
                 case 2
                     ByteString = srl_read(obj.Port, nTotalBytes);
+                case 3
+                    ByteString = fread(obj.Port, nTotalBytes, 'uint8')';
+                case 4
+                    ByteString = uint8(pnet(obj.Port,'read', nTotalBytes, 'uint8'));
             end
             if isempty(ByteString)
                 error('Error: The serial port returned 0 bytes.')
@@ -297,12 +359,16 @@ classdef ArCOMObject_Bpod < handle
                         varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*2)-1)), 'uint16'); Pos = Pos + nValues(i)*2;
                     case 'uint32'
                         varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*4)-1)), 'uint32'); Pos = Pos + nValues(i)*4;
+                    case 'uint64'
+                        varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*8)-1)), 'uint32'); Pos = Pos + nValues(i)*8;
                     case 'int8'
                         varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i))-1)), 'int8'); Pos = Pos + nValues(i);
                     case 'int16'
                         varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*2)-1)), 'int16'); Pos = Pos + nValues(i)*2;
                     case 'int32'
                         varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*4)-1)), 'int32'); Pos = Pos + nValues(i)*4;
+                    case 'int64'
+                        varargout{i} = typecast(uint8(ByteString(Pos:Pos+(nValues(i)*8)-1)), 'int32'); Pos = Pos + nValues(i)*8;
                 end
             end
         end
@@ -316,6 +382,11 @@ classdef ArCOMObject_Bpod < handle
                 case 2
                     fclose(obj.Port);
                     obj.Port = [];
+                case 3
+                    fclose(obj.Port);
+                    delete(obj.Port);
+                case 4
+                    pnet(obj.Port,'close');
             end
         end
         function close(obj)
